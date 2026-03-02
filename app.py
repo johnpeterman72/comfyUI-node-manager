@@ -556,6 +556,62 @@ def run_pip_install(python_exe: str, packages: list[str], dry_run: bool = False)
         return 1, f"ERROR: {e}"
 
 
+# Known build-error patterns and the advice to show the user
+BUILD_ERROR_HINTS: list[tuple[str, str, str]] = [
+    (
+        r"Microsoft Visual C\+\+ 14\.0 or greater is required",
+        "Microsoft Visual C++ Build Tools Required",
+        "This package contains C/C++ extensions that must be compiled.\n\n"
+        "**Fix:** Install the [Microsoft C++ Build Tools]"
+        "(https://visualstudio.microsoft.com/visual-cpp-build-tools/).\n"
+        "In the installer, select **\"Desktop development with C++\"** and restart your machine.\n\n"
+        "Alternatively, look for a pre-built wheel for this package "
+        "(some packages offer `*-cp311-win_amd64.whl` downloads on PyPI or GitHub Releases).",
+    ),
+    (
+        r"Failed building wheel for",
+        "Wheel Build Failed",
+        "pip could not build a wheel for one or more packages. Common causes:\n"
+        "- Missing C/C++ compiler (install MS Build Tools — see above)\n"
+        "- Missing system library headers\n"
+        "- Package doesn't support your Python version\n\n"
+        "**Tip:** Try installing packages one at a time to isolate the failure, "
+        "or search PyPI for a pre-built wheel.",
+    ),
+    (
+        r"No matching distribution found",
+        "Package Not Found",
+        "pip could not find a version of this package that matches your Python version or platform.\n\n"
+        "**Check:** Is the package name spelled correctly? Does it support Python 3.11 on Windows?",
+    ),
+    (
+        r"(?i)permission(?:s)?\s+(?:denied|error)",
+        "Permission Denied",
+        "pip doesn't have permission to write to the target directory.\n\n"
+        "**Fix:** Make sure no other process (ComfyUI, SwarmUI) is using the embedded Python, "
+        "then try again.",
+    ),
+    (
+        r"Ignoring invalid distribution",
+        "Corrupted Package Detected",
+        "There is a broken/partial package in your `site-packages` directory "
+        "(the folder name starts with `~`). This is usually left over from a failed install.\n\n"
+        "**Fix:** Open `site-packages`, find any folder starting with `~`, and delete it.",
+    ),
+]
+
+
+def diagnose_pip_output(output: str) -> list[tuple[str, str]]:
+    """Scan pip output for known error patterns. Returns [(title, advice), ...]."""
+    hints = []
+    seen = set()
+    for pattern, title, advice in BUILD_ERROR_HINTS:
+        if title not in seen and re.search(pattern, output):
+            hints.append((title, advice))
+            seen.add(title)
+    return hints
+
+
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 
 def main():
@@ -1117,6 +1173,10 @@ def main():
                     st.success("Installation completed successfully!")
                 else:
                     st.error(f"Installation failed (exit code {rc})")
+                    # Diagnose the output and show actionable hints
+                    hints = diagnose_pip_output(output)
+                    for title, advice in hints:
+                        st.warning(f"**{title}**\n\n{advice}")
 
                 st.code(output, language="text")
 
@@ -1145,10 +1205,8 @@ def render_terminal_log():
 
         if activity:
             log_text = "\n".join(activity)
-            st.markdown(
-                f'<div class="terminal-log">{log_text}</div>',
-                unsafe_allow_html=True,
-            )
+            # st.code renders with Streamlit's built-in copy button (top-right icon)
+            st.code(log_text, language="log", wrap_lines=True)
         else:
             st.caption("No activity yet. Actions will be logged here.")
 
