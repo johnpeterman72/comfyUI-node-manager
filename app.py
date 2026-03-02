@@ -556,17 +556,17 @@ def run_pip_install(python_exe: str, packages: list[str], dry_run: bool = False)
         return 1, f"ERROR: {e}"
 
 
-# Known build-error patterns and the advice to show the user
-BUILD_ERROR_HINTS: list[tuple[str, str, str]] = [
+# Known build-error patterns and the advice to show the user.
+# The 4th element is an optional "fix_key" that tells the UI to show a fix button.
+BUILD_ERROR_HINTS: list[tuple[str, str, str, Optional[str]]] = [
     (
         r"Microsoft Visual C\+\+ 14\.0 or greater is required",
         "Microsoft Visual C++ Build Tools Required",
         "This package contains C/C++ extensions that must be compiled.\n\n"
-        "**Fix:** Install the [Microsoft C++ Build Tools]"
-        "(https://visualstudio.microsoft.com/visual-cpp-build-tools/).\n"
-        "In the installer, select **\"Desktop development with C++\"** and restart your machine.\n\n"
+        "**Fix:** Install the Microsoft C++ Build Tools, then restart your machine.\n\n"
         "Alternatively, look for a pre-built wheel for this package "
         "(some packages offer `*-cp311-win_amd64.whl` downloads on PyPI or GitHub Releases).",
+        "install_msvc",
     ),
     (
         r"Failed building wheel for",
@@ -577,12 +577,14 @@ BUILD_ERROR_HINTS: list[tuple[str, str, str]] = [
         "- Package doesn't support your Python version\n\n"
         "**Tip:** Try installing packages one at a time to isolate the failure, "
         "or search PyPI for a pre-built wheel.",
+        None,
     ),
     (
         r"No matching distribution found",
         "Package Not Found",
         "pip could not find a version of this package that matches your Python version or platform.\n\n"
         "**Check:** Is the package name spelled correctly? Does it support Python 3.11 on Windows?",
+        None,
     ),
     (
         r"(?i)permission(?:s)?\s+(?:denied|error)",
@@ -590,26 +592,147 @@ BUILD_ERROR_HINTS: list[tuple[str, str, str]] = [
         "pip doesn't have permission to write to the target directory.\n\n"
         "**Fix:** Make sure no other process (ComfyUI, SwarmUI) is using the embedded Python, "
         "then try again.",
+        None,
     ),
     (
         r"Ignoring invalid distribution",
         "Corrupted Package Detected",
-        "There is a broken/partial package in your `site-packages` directory "
-        "(the folder name starts with `~`). This is usually left over from a failed install.\n\n"
-        "**Fix:** Open `site-packages`, find any folder starting with `~`, and delete it.",
+        "There are broken/partial packages in your `site-packages` directory "
+        "(folder names starting with `~`). These are left over from failed installs "
+        "and can cause warnings or conflicts.",
+        "fix_corrupted",
     ),
 ]
 
 
-def diagnose_pip_output(output: str) -> list[tuple[str, str]]:
-    """Scan pip output for known error patterns. Returns [(title, advice), ...]."""
+def diagnose_pip_output(output: str) -> list[tuple[str, str, Optional[str]]]:
+    """Scan pip output for known error patterns. Returns [(title, advice, fix_key), ...]."""
     hints = []
     seen = set()
-    for pattern, title, advice in BUILD_ERROR_HINTS:
+    for pattern, title, advice, fix_key in BUILD_ERROR_HINTS:
         if title not in seen and re.search(pattern, output):
-            hints.append((title, advice))
+            hints.append((title, advice, fix_key))
             seen.add(title)
     return hints
+
+
+# ── Auto-fix: corrupted packages ─────────────────────────────────────────────
+
+
+def find_corrupted_packages(python_exe: str) -> list[Path]:
+    """Find all ~tilde folders in site-packages (broken partial installs)."""
+    site_packages = Path(python_exe).parent / "Lib" / "site-packages"
+    if not site_packages.is_dir():
+        return []
+    return sorted(p for p in site_packages.iterdir() if p.is_dir() and p.name.startswith("~"))
+
+
+def remove_corrupted_packages(python_exe: str) -> tuple[list[str], list[str]]:
+    """
+    Delete all ~tilde folders from site-packages.
+    Returns (deleted, failed) lists of folder names.
+    """
+    import shutil
+    corrupted = find_corrupted_packages(python_exe)
+    deleted = []
+    failed = []
+    for p in corrupted:
+        try:
+            shutil.rmtree(p)
+            log(f"Deleted corrupted package: {p.name}")
+            deleted.append(p.name)
+        except Exception as e:
+            log(f"ERROR deleting {p.name}: {e}")
+            failed.append(f"{p.name} ({e})")
+    return deleted, failed
+
+
+# ── Auto-fix: MSVC Build Tools ───────────────────────────────────────────────
+
+VSWHERE = r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+
+
+def check_msvc_installed() -> bool:
+    """Check if Microsoft Visual C++ Build Tools are installed."""
+    # Method 1: vswhere
+    if Path(VSWHERE).exists():
+        try:
+            result = subprocess.run(
+                [VSWHERE, "-products", "*", "-requires",
+                 "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+                 "-property", "installationPath"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return True
+        except Exception:
+            pass
+    # Method 2: check common paths
+    for path in [
+        r"C:\Program Files\Microsoft Visual Studio\2022",
+        r"C:\Program Files (x86)\Microsoft Visual Studio\2022",
+        r"C:\Program Files\Microsoft Visual Studio\2019",
+        r"C:\BuildTools",
+    ]:
+        if Path(path).is_dir():
+            return True
+    return False
+
+
+def check_winget_available() -> bool:
+    """Check if winget is available for automated installs."""
+    try:
+        result = subprocess.run(
+            ["winget", "--version"],
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
+def install_msvc_build_tools() -> tuple[int, str]:
+    """
+    Install Microsoft Visual C++ Build Tools via winget.
+    Returns (return_code, output).
+    """
+    log("Attempting to install Microsoft Visual C++ Build Tools via winget...")
+
+    if not check_winget_available():
+        msg = ("winget is not available on this system.\n\n"
+               "Please install the Build Tools manually from:\n"
+               "https://visualstudio.microsoft.com/visual-cpp-build-tools/")
+        log("winget not available — manual install required")
+        return 1, msg
+
+    cmd = [
+        "winget", "install",
+        "Microsoft.VisualStudio.2022.BuildTools",
+        "--override", "--quiet --wait --add "
+        "Microsoft.VisualStudio.Workload.VCTools "
+        "--includeRecommended",
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+    ]
+    log(f"Running: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=600,
+        )
+        output = result.stdout + ("\n" + result.stderr if result.stderr else "")
+        for line in output.strip().splitlines():
+            log(f"  winget: {line}")
+        if result.returncode == 0:
+            log("MSVC Build Tools installation completed")
+        else:
+            log(f"winget exited with code {result.returncode}")
+        return result.returncode, output
+    except subprocess.TimeoutExpired:
+        log("ERROR: winget timed out after 10 minutes")
+        return 1, "Installation timed out after 10 minutes"
+    except Exception as e:
+        log(f"ERROR: {e}")
+        return 1, str(e)
 
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
@@ -1053,6 +1176,80 @@ def main():
     with tab_install:
         st.subheader("Installation")
 
+        # ── Environment Health Check ──────────────────────────────────────────
+        st.markdown("### Environment Health")
+        health_col1, health_col2 = st.columns(2)
+
+        # Corrupted packages check
+        with health_col1:
+            corrupted = find_corrupted_packages(python_exe)
+            if corrupted:
+                with st.container(border=True):
+                    st.markdown(f"**Corrupted Packages ({len(corrupted)})**")
+                    st.caption(
+                        "Broken partial installs in site-packages (folders starting with `~`). "
+                        "These cause pip warnings and can interfere with installs."
+                    )
+                    for p in corrupted:
+                        st.text(f"  {p.name}/")
+                    if st.button("Auto-fix: Delete All Corrupted Packages",
+                                 type="primary", key="fix_corrupted_btn"):
+                        with st.spinner("Removing corrupted packages..."):
+                            deleted, failed = remove_corrupted_packages(python_exe)
+                        if deleted:
+                            st.success(f"Deleted {len(deleted)} corrupted packages: {', '.join(deleted)}")
+                        if failed:
+                            st.error(f"Failed to delete: {', '.join(failed)}")
+                        if deleted and not failed:
+                            st.rerun()
+            else:
+                with st.container(border=True):
+                    st.markdown("**Corrupted Packages**")
+                    st.success("No corrupted packages found")
+
+        # MSVC check
+        with health_col2:
+            with st.container(border=True):
+                st.markdown("**C/C++ Compiler (MSVC)**")
+                msvc_ok = check_msvc_installed()
+                if msvc_ok:
+                    st.success("Visual C++ Build Tools detected")
+                else:
+                    st.caption(
+                        "Not installed. Some packages with C extensions "
+                        "(e.g., hydra, bitsandbytes) will fail to build."
+                    )
+                    if st.button("Install Visual C++ Build Tools",
+                                 type="primary", key="install_msvc_btn"):
+                        if not check_winget_available():
+                            st.error(
+                                "**winget** is not available on this system.\n\n"
+                                "Please install the Build Tools manually from: "
+                                "[visualstudio.microsoft.com]"
+                                "(https://visualstudio.microsoft.com/visual-cpp-build-tools/)"
+                            )
+                        else:
+                            st.info(
+                                "This will install **Visual Studio 2022 Build Tools** "
+                                "with the C++ workload via winget. "
+                                "The install may take several minutes and will require "
+                                "a restart before the compiler is usable."
+                            )
+                            if st.button("Confirm Install", key="confirm_msvc"):
+                                with st.spinner("Installing MSVC Build Tools (this may take a while)..."):
+                                    rc, output = install_msvc_build_tools()
+                                if rc == 0:
+                                    st.success(
+                                        "Build Tools installed! **Restart your machine** "
+                                        "before building packages that need a C compiler."
+                                    )
+                                else:
+                                    st.error("Installation failed — check the terminal log for details")
+                                st.code(output, language="text")
+
+        st.divider()
+
+        # ── Package Install ───────────────────────────────────────────────────
         resolutions = st.session_state.get("resolutions", {})
         to_install = {
             k: v for k, v in resolutions.items()
@@ -1173,10 +1370,14 @@ def main():
                     st.success("Installation completed successfully!")
                 else:
                     st.error(f"Installation failed (exit code {rc})")
-                    # Diagnose the output and show actionable hints
+                    # Diagnose the output and show actionable hints with fix buttons
                     hints = diagnose_pip_output(output)
-                    for title, advice in hints:
+                    for title, advice, fix_key in hints:
                         st.warning(f"**{title}**\n\n{advice}")
+                        if fix_key == "fix_corrupted":
+                            st.info("Use the **Environment Health** section above to auto-fix corrupted packages.")
+                        elif fix_key == "install_msvc":
+                            st.info("Use the **Environment Health** section above to install the C++ Build Tools.")
 
                 st.code(output, language="text")
 
