@@ -745,7 +745,7 @@ def main():
         initial_sidebar_state="expanded",
     )
 
-    # Custom CSS for cleaner look
+    # Custom CSS + floating back-to-top button
     st.markdown("""
     <style>
     .conflict-red { color: #ff4b4b; font-weight: bold; }
@@ -753,21 +753,55 @@ def main():
     .warn-orange { color: #ffa534; font-weight: bold; }
     .missing-gray { color: #808495; font-style: italic; }
     div[data-testid="stMetric"] { background: #262730; padding: 12px; border-radius: 8px; }
-    /* Terminal log styling */
-    .terminal-log {
-        background: #0e1117;
-        color: #00ff41;
-        font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
-        font-size: 12px;
-        padding: 12px;
-        border-radius: 6px;
-        max-height: 350px;
-        overflow-y: auto;
-        white-space: pre-wrap;
-        word-break: break-all;
-        border: 1px solid #1e2530;
+    /* Floating back-to-top button */
+    #back-to-top {
+        position: fixed;
+        bottom: 2rem;
+        right: 2rem;
+        z-index: 9999;
+        width: 48px;
+        height: 48px;
+        border-radius: 50%;
+        background: #ff4b4b;
+        color: white;
+        border: none;
+        cursor: pointer;
+        font-size: 22px;
+        line-height: 48px;
+        text-align: center;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 0.3s;
+    }
+    #back-to-top.visible {
+        opacity: 1;
+        pointer-events: auto;
+    }
+    #back-to-top:hover {
+        background: #ff6b6b;
+        transform: scale(1.1);
     }
     </style>
+    <button id="back-to-top" title="Back to top" onclick="scrollToTop()">&#8679;</button>
+    <script>
+    function scrollToTop() {
+        const main = window.parent.document.querySelector('section.main');
+        if (main) { main.scrollTo({top: 0, behavior: 'smooth'}); }
+        window.scrollTo({top: 0, behavior: 'smooth'});
+    }
+    // Show/hide based on scroll position
+    function checkScroll() {
+        const btn = document.getElementById('back-to-top');
+        if (!btn) return;
+        const main = window.parent.document.querySelector('section.main');
+        const scrollY = main ? main.scrollTop : window.scrollY;
+        btn.classList.toggle('visible', scrollY > 400);
+    }
+    const mainEl = window.parent.document.querySelector('section.main');
+    if (mainEl) { mainEl.addEventListener('scroll', checkScroll); }
+    window.addEventListener('scroll', checkScroll);
+    </script>
     """, unsafe_allow_html=True)
 
     # ── Sidebar ───────────────────────────────────────────────────────────────
@@ -1060,10 +1094,18 @@ def main():
                             "version": "",
                             "display_name": info["display_name"],
                         }
+                    # Clear cached radio widget selections so they reset to index 0 (Skip)
+                    for pkg_key, *_ in resolver_pkgs:
+                        st.session_state.pop(f"resolve_{pkg_key}", None)
+                        st.session_state.pop(f"manual_{pkg_key}", None)
                     st.rerun()
             with qcol3:
                 if st.button("Clear all choices"):
                     st.session_state["resolutions"] = {}
+                    # Clear all cached radio widget selections
+                    for pkg_key, *_ in resolver_pkgs:
+                        st.session_state.pop(f"resolve_{pkg_key}", None)
+                        st.session_state.pop(f"manual_{pkg_key}", None)
                     st.rerun()
 
             st.divider()
