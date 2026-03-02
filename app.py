@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from configparser import ConfigParser
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -21,6 +22,26 @@ import streamlit as st
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.specifiers import SpecifierSet
 from packaging.version import Version, InvalidVersion
+
+
+# ── Activity Log ──────────────────────────────────────────────────────────────
+# A simple in-memory log that every function can write to.
+# Rendered as a collapsible terminal at the bottom of the page.
+
+def _get_log() -> list[str]:
+    if "activity_log" not in st.session_state:
+        st.session_state["activity_log"] = []
+    return st.session_state["activity_log"]
+
+
+def log(msg: str):
+    """Append a timestamped message to the activity log."""
+    ts = datetime.now().strftime("%H:%M:%S")
+    _get_log().append(f"[{ts}] {msg}")
+
+
+def log_clear():
+    st.session_state["activity_log"] = []
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 
@@ -35,6 +56,70 @@ SPECIAL_PACKAGES = {
     "torch", "torchvision", "torchaudio", "xformers",
     "triton", "bitsandbytes", "flash-attn",
 }
+
+# ── Pip version check ─────────────────────────────────────────────────────────
+
+
+def check_pip_version(python_exe: str) -> tuple[Optional[str], Optional[str]]:
+    """
+    Check the installed pip version and whether a newer one is available.
+    Returns (current_version, latest_version). Either may be None on error.
+    """
+    current = None
+    latest = None
+    try:
+        result = subprocess.run(
+            [python_exe, "-m", "pip", "--version"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            m = re.search(r'pip\s+([\d.]+)', result.stdout)
+            if m:
+                current = m.group(1)
+                log(f"pip current version: {current}")
+    except Exception as e:
+        log(f"ERROR checking pip version: {e}")
+
+    try:
+        result = subprocess.run(
+            [python_exe, "-m", "pip", "index", "versions", "pip"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            # Output like: "pip (24.3.1)\nAvailable versions: 24.3.1, 24.2, ..."
+            m = re.search(r'Available versions:\s*([\d.]+)', result.stdout)
+            if m:
+                latest = m.group(1)
+                log(f"pip latest version:  {latest}")
+        else:
+            # Fallback: try `pip install pip==__nonexistent__` trick to get versions
+            # or just query PyPI JSON API
+            resp = requests.get("https://pypi.org/pypi/pip/json", timeout=10)
+            if resp.status_code == 200:
+                latest = resp.json()["info"]["version"]
+                log(f"pip latest version (via PyPI): {latest}")
+    except Exception as e:
+        log(f"Could not check latest pip version: {e}")
+
+    return current, latest
+
+
+def upgrade_pip(python_exe: str) -> tuple[int, str]:
+    """Upgrade pip in the embedded Python environment."""
+    cmd = [python_exe, "-m", "pip", "install", "--upgrade", "pip"]
+    log(f"Running: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        output = result.stdout + ("\n" + result.stderr if result.stderr else "")
+        if result.returncode == 0:
+            log("pip upgraded successfully")
+        else:
+            log(f"pip upgrade failed (exit code {result.returncode})")
+        return result.returncode, output
+    except Exception as e:
+        log(f"ERROR upgrading pip: {e}")
+        return 1, str(e)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -181,12 +266,14 @@ def scan_node(node_dir: Path, use_github: bool = True) -> dict:
     name = node_dir.name
     reqs: list[Requirement] = []
     sources: list[str] = []
+    log(f"Scanning node: {name}")
 
     # Parse local dependency files
     req_txt = node_dir / "requirements.txt"
     if req_txt.exists():
         reqs.extend(parse_requirements_txt(req_txt))
         sources.append("requirements.txt")
+        log(f"  {name}: parsed requirements.txt ({len(reqs)} deps)")
 
     pyproject = node_dir / "pyproject.toml"
     if pyproject.exists():
@@ -194,6 +281,7 @@ def scan_node(node_dir: Path, use_github: bool = True) -> dict:
         if found:
             reqs.extend(found)
             sources.append("pyproject.toml")
+            log(f"  {name}: parsed pyproject.toml (+{len(found)} deps)")
 
     setup = node_dir / "setup.py"
     if setup.exists():
@@ -201,6 +289,7 @@ def scan_node(node_dir: Path, use_github: bool = True) -> dict:
         if found:
             reqs.extend(found)
             sources.append("setup.py")
+            log(f"  {name}: parsed setup.py (+{len(found)} deps)")
 
     install = node_dir / "install.py"
     if install.exists():
@@ -208,14 +297,17 @@ def scan_node(node_dir: Path, use_github: bool = True) -> dict:
         if found:
             reqs.extend(found)
             sources.append("install.py")
+            log(f"  {name}: parsed install.py (+{len(found)} deps)")
 
     # GitHub fallback
     github_url = detect_github_url(node_dir)
     if use_github and github_url and not reqs:
+        log(f"  {name}: no local deps, trying GitHub ({github_url})...")
         gh_reqs = fetch_github_requirements(github_url)
         if gh_reqs:
             reqs.extend(gh_reqs)
             sources.append("GitHub")
+            log(f"  {name}: fetched {len(gh_reqs)} deps from GitHub")
 
     # Deduplicate by package name (keep first)
     seen = set()
@@ -239,11 +331,14 @@ def scan_all_nodes(nodes_dir: str, use_github: bool = True) -> list[dict]:
     """Scan all valid custom nodes in the directory."""
     nodes_path = Path(nodes_dir)
     if not nodes_path.is_dir():
+        log(f"ERROR: Directory not found: {nodes_dir}")
         return []
+    log(f"Starting scan of {nodes_dir}")
     results = []
     for child in sorted(nodes_path.iterdir()):
         if child.is_dir() and (child / "__init__.py").exists():
             results.append(scan_node(child, use_github=use_github))
+    log(f"Scan complete: {len(results)} nodes found")
     return results
 
 
@@ -252,6 +347,7 @@ def scan_all_nodes(nodes_dir: str, use_github: bool = True) -> list[dict]:
 
 def get_installed_packages(python_exe: str) -> dict[str, str]:
     """Run pip list and return {normalized_name: version}."""
+    log(f"Running: {python_exe} -m pip list --format=json")
     try:
         result = subprocess.run(
             [python_exe, "-m", "pip", "list", "--format=json"],
@@ -259,12 +355,15 @@ def get_installed_packages(python_exe: str) -> dict[str, str]:
         )
         if result.returncode == 0:
             pkgs = json.loads(result.stdout)
+            log(f"Loaded {len(pkgs)} installed packages")
             return {
                 p["name"].lower().replace("-", "_").replace(".", "_"): p["version"]
                 for p in pkgs
             }
-    except Exception:
-        pass
+        else:
+            log(f"pip list failed (exit code {result.returncode})")
+    except Exception as e:
+        log(f"ERROR loading installed packages: {e}")
     return {}
 
 
@@ -403,6 +502,7 @@ def load_cache() -> Optional[list[dict]]:
 
 def backup_pip_freeze(python_exe: str) -> Optional[str]:
     """Save current pip freeze to a timestamped file. Returns path."""
+    log("Creating pip freeze backup...")
     try:
         result = subprocess.run(
             [python_exe, "-m", "pip", "freeze"],
@@ -414,9 +514,12 @@ def backup_pip_freeze(python_exe: str) -> Optional[str]:
             ts = time.strftime("%Y%m%d_%H%M%S")
             path = backup_dir / f"pip_freeze_{ts}.txt"
             path.write_text(result.stdout, encoding="utf-8")
+            log(f"Backup saved: {path}")
             return str(path)
-    except Exception:
-        pass
+        else:
+            log(f"pip freeze failed (exit code {result.returncode})")
+    except Exception as e:
+        log(f"ERROR creating backup: {e}")
     return None
 
 
@@ -429,6 +532,7 @@ def run_pip_install(python_exe: str, packages: list[str], dry_run: bool = False)
     If dry_run, just return the command that would be run.
     """
     cmd = [python_exe, "-m", "pip", "install", "--no-cache-dir"] + packages
+    log(f"{'[DRY RUN] ' if dry_run else ''}Running: {' '.join(cmd)}")
     if dry_run:
         return 0, f"Would run:\n{' '.join(cmd)}"
     try:
@@ -436,10 +540,19 @@ def run_pip_install(python_exe: str, packages: list[str], dry_run: bool = False)
             cmd, capture_output=True, text=True, timeout=600,
         )
         output = result.stdout + ("\n" + result.stderr if result.stderr else "")
+        if result.returncode == 0:
+            log(f"pip install succeeded ({len(packages)} packages)")
+        else:
+            log(f"pip install FAILED (exit code {result.returncode})")
+        # Log each line of output
+        for line in output.strip().splitlines():
+            log(f"  pip: {line}")
         return result.returncode, output
     except subprocess.TimeoutExpired:
+        log("ERROR: pip install timed out after 10 minutes")
         return 1, "ERROR: pip install timed out after 10 minutes"
     except Exception as e:
+        log(f"ERROR: {e}")
         return 1, f"ERROR: {e}"
 
 
@@ -461,6 +574,20 @@ def main():
     .warn-orange { color: #ffa534; font-weight: bold; }
     .missing-gray { color: #808495; font-style: italic; }
     div[data-testid="stMetric"] { background: #262730; padding: 12px; border-radius: 8px; }
+    /* Terminal log styling */
+    .terminal-log {
+        background: #0e1117;
+        color: #00ff41;
+        font-family: 'Cascadia Code', 'Consolas', 'Courier New', monospace;
+        font-size: 12px;
+        padding: 12px;
+        border-radius: 6px;
+        max-height: 350px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+        word-break: break-all;
+        border: 1px solid #1e2530;
+    }
     </style>
     """, unsafe_allow_html=True)
 
@@ -512,16 +639,58 @@ def main():
             st.metric("Nodes with Dependencies", nodes_with_deps)
             st.metric("Total Requirements", total_reqs)
 
+        # ── Pip version check ─────────────────────────────────────────────────
+        st.divider()
+        st.caption("pip Status")
+        if "pip_version" not in st.session_state:
+            if Path(python_exe).exists():
+                cur, latest = check_pip_version(python_exe)
+                st.session_state["pip_version"] = (cur, latest)
+            else:
+                st.session_state["pip_version"] = (None, None)
+
+        pip_cur, pip_latest = st.session_state["pip_version"]
+        if pip_cur:
+            needs_update = False
+            if pip_latest:
+                try:
+                    needs_update = Version(pip_latest) > Version(pip_cur)
+                except InvalidVersion:
+                    pass
+
+            if needs_update:
+                st.warning(f"pip **{pip_cur}** installed — **{pip_latest}** available")
+                if st.button("Upgrade pip", use_container_width=True):
+                    with st.spinner("Upgrading pip..."):
+                        rc, output = upgrade_pip(python_exe)
+                    if rc == 0:
+                        st.session_state.pop("pip_version", None)
+                        st.toast("pip upgraded!", icon="✅")
+                        st.rerun()
+                    else:
+                        st.error("Upgrade failed — check terminal log")
+            else:
+                st.success(f"pip **{pip_cur}** (up to date)")
+        else:
+            st.caption("Could not determine pip version")
+
+        if st.button("Re-check pip version", use_container_width=True):
+            st.session_state.pop("pip_version", None)
+            st.rerun()
+
     # ── Scanning logic ────────────────────────────────────────────────────────
     if rescan:
+        log("User triggered: Rescan All Nodes")
         with st.spinner("Scanning custom nodes..."):
             nodes_data = scan_all_nodes(nodes_dir, use_github=use_github)
             st.session_state["nodes"] = nodes_data
             save_cache(nodes_data)
+            log("Cache saved to disk")
             st.session_state.pop("installed_packages", None)
             st.toast(f"Scanned {len(nodes_data)} nodes", icon="✅")
 
     if refresh_pkgs:
+        log("User triggered: Refresh Pip List")
         st.session_state.pop("installed_packages", None)
         st.toast("Pip list will refresh", icon="🔄")
 
@@ -954,6 +1123,34 @@ def main():
                 # Refresh installed packages
                 st.session_state.pop("installed_packages", None)
                 st.toast("Refresh the page to see updated package versions", icon="🔄")
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # COLLAPSIBLE TERMINAL LOG (always at the bottom)
+    # ══════════════════════════════════════════════════════════════════════════
+    render_terminal_log()
+
+
+def render_terminal_log():
+    """Render the collapsible activity log at the bottom of the page."""
+    activity = _get_log()
+    count = len(activity)
+    label = f"Terminal Log ({count} entries)" if count else "Terminal Log"
+
+    with st.expander(label, expanded=False):
+        col1, col2 = st.columns([4, 1])
+        with col2:
+            if st.button("Clear Log", key="clear_log", use_container_width=True):
+                log_clear()
+                st.rerun()
+
+        if activity:
+            log_text = "\n".join(activity)
+            st.markdown(
+                f'<div class="terminal-log">{log_text}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.caption("No activity yet. Actions will be logged here.")
 
 
 if __name__ == "__main__":
