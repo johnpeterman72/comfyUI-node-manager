@@ -735,6 +735,171 @@ def install_msvc_build_tools() -> tuple[int, str]:
         return 1, str(e)
 
 
+# ── Node Card Renderers ───────────────────────────────────────────────────────
+
+
+def _health_bar(score: float) -> str:
+    """Return a colored health bar as HTML."""
+    if score >= 80:
+        color = "#21c354"
+    elif score >= 50:
+        color = "#ffa534"
+    else:
+        color = "#ff4b4b"
+    return (
+        f'<div style="background:#262730;border-radius:4px;height:8px;width:100%;overflow:hidden">'
+        f'<div style="background:{color};height:100%;width:{score:.0f}%;border-radius:4px"></div>'
+        f'</div>'
+    )
+
+
+def _status_dots(n: dict) -> str:
+    """Return colored dot summary: green ok, red conflicts, gray missing."""
+    parts = []
+    if n["n_ok"]:
+        parts.append(f'<span style="color:#21c354">{n["n_ok"]} ok</span>')
+    if n["n_conflicts"]:
+        parts.append(f'<span style="color:#ff4b4b">{n["n_conflicts"]} conflict</span>')
+    if n["n_missing"]:
+        parts.append(f'<span style="color:#808495">{n["n_missing"]} missing</span>')
+    if not parts:
+        parts.append('<span style="color:#808495">no deps</span>')
+    return " · ".join(parts)
+
+
+def _render_nodes_list(nodes: list[dict]):
+    """Compact list view — one row per node, expandable."""
+    for n in nodes:
+        health = n["health_score"]
+        dots = _status_dots(n)
+        label = f"**{n['name']}** — {n['n_deps']} deps · {dots}"
+
+        with st.expander(label, expanded=False):
+            c1, c2, c3 = st.columns([1, 1, 1])
+            with c1:
+                st.markdown(f"**Dependencies:** {n['n_deps']}")
+                st.markdown(f"**Sources:** {', '.join(n['sources']) or '—'}")
+            with c2:
+                if n["github"]:
+                    st.markdown(f"**GitHub:** [{n['github']}](https://github.com/{n['github']})")
+                else:
+                    st.markdown("**GitHub:** —")
+                st.markdown(f"**Health:** {health:.0f}%")
+                st.markdown(_health_bar(health), unsafe_allow_html=True)
+            with c3:
+                if n["n_conflicts"]:
+                    st.markdown("**Conflicts:**")
+                    for cp in n["conflict_pkgs"]:
+                        st.caption(f"  {cp}")
+                if n["n_missing"]:
+                    st.markdown("**Missing:**")
+                    for mp in n["missing_pkgs"]:
+                        st.caption(f"  {mp}")
+
+            if n["requirements"]:
+                st.markdown("**All requirements:**")
+                st.code(", ".join(n["requirements"]), language=None)
+
+
+def _render_nodes_grid(nodes: list[dict]):
+    """Card grid — 3 columns, compact cards, expandable detail."""
+    cols = st.columns(3)
+    for i, n in enumerate(nodes):
+        with cols[i % 3]:
+            health = n["health_score"]
+            # Card coloring
+            if n["n_conflicts"]:
+                border = "#ff4b4b"
+            elif n["n_missing"]:
+                border = "#ffa534"
+            elif n["n_deps"] == 0:
+                border = "#262730"
+            else:
+                border = "#21c354"
+
+            st.markdown(
+                f'<div style="border:2px solid {border};border-radius:8px;'
+                f'padding:12px;margin-bottom:8px;min-height:110px">'
+                f'<strong>{n["name"]}</strong><br>'
+                f'<span style="font-size:13px">{n["n_deps"]} deps</span><br>'
+                f'<span style="font-size:12px">{_status_dots(n)}</span><br>'
+                f'{_health_bar(health)}'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            with st.expander("Details", expanded=False):
+                st.caption(f"Sources: {', '.join(n['sources']) or '—'}")
+                if n["github"]:
+                    st.caption(f"GitHub: [{n['github']}](https://github.com/{n['github']})")
+                if n["conflict_pkgs"]:
+                    st.markdown("**Conflicts:**")
+                    for cp in n["conflict_pkgs"]:
+                        st.caption(cp)
+                if n["missing_pkgs"]:
+                    st.markdown("**Missing:**")
+                    for mp in n["missing_pkgs"]:
+                        st.caption(mp)
+                if n["requirements"]:
+                    st.code(", ".join(n["requirements"]), language=None)
+
+
+def _render_nodes_detail(nodes: list[dict]):
+    """Full detail view — all info visible, no expansion needed."""
+    for n in nodes:
+        health = n["health_score"]
+        if n["n_conflicts"]:
+            border = "#ff4b4b"
+        elif n["n_missing"]:
+            border = "#ffa534"
+        elif n["n_deps"] == 0:
+            border = "#262730"
+        else:
+            border = "#21c354"
+
+        with st.container(border=True):
+            h1, h2 = st.columns([3, 1])
+            with h1:
+                st.markdown(f"### {n['name']}")
+            with h2:
+                st.markdown(
+                    f'<div style="text-align:right;font-size:28px;font-weight:bold;'
+                    f'color:{"#21c354" if health >= 80 else "#ffa534" if health >= 50 else "#ff4b4b"}">'
+                    f'{health:.0f}%</div>',
+                    unsafe_allow_html=True,
+                )
+
+            st.markdown(_health_bar(health), unsafe_allow_html=True)
+
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.metric("Dependencies", n["n_deps"])
+            with c2:
+                st.metric("OK", n["n_ok"])
+            with c3:
+                st.metric("Conflicts", n["n_conflicts"])
+            with c4:
+                st.metric("Missing", n["n_missing"])
+
+            d1, d2 = st.columns(2)
+            with d1:
+                st.markdown(f"**Sources:** {', '.join(n['sources']) or '—'}")
+                if n["github"]:
+                    st.markdown(f"**GitHub:** [{n['github']}](https://github.com/{n['github']})")
+            with d2:
+                if n["conflict_pkgs"]:
+                    st.markdown("**Conflicts:**")
+                    for cp in n["conflict_pkgs"]:
+                        st.caption(f"  {cp}")
+                if n["missing_pkgs"]:
+                    st.markdown("**Missing:**")
+                    for mp in n["missing_pkgs"]:
+                        st.caption(f"  {mp}")
+
+            if n["requirements"]:
+                with st.expander("All requirements", expanded=False):
+                    st.code(", ".join(n["requirements"]), language=None)
+
+
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 
 def main():
@@ -931,39 +1096,100 @@ def main():
     ])
 
     # ══════════════════════════════════════════════════════════════════════════
-    # TAB 1: NODES
+    # TAB 1: NODES (Score Cards)
     # ══════════════════════════════════════════════════════════════════════════
     with tab_nodes:
         st.subheader("Custom Nodes Overview")
 
-        # Filter
-        filter_text = st.text_input("Filter nodes by name", "", key="node_filter")
-
-        rows = []
+        # ── Build per-node stats (conflicts, missing, ok) ────────────────────
+        node_stats: list[dict] = []
         for n in nodes_data:
-            if filter_text and filter_text.lower() not in n["name"].lower():
-                continue
-            rows.append({
-                "Node": n["name"],
-                "Dependencies": len(n["requirements"]),
-                "Sources": ", ".join(n["sources"]) if n["sources"] else "—",
-                "GitHub": n["github"] or "—",
-                "Requirements": ", ".join(n["requirements"]) if n["requirements"] else "—",
+            n_conflicts = 0
+            n_missing = 0
+            n_ok = 0
+            conflict_pkgs = []
+            missing_pkgs = []
+            for req_str in n["requirements"]:
+                r = safe_parse_requirement(req_str)
+                if not r:
+                    continue
+                pkg_key = normalize_name(r.name)
+                inst_ver = installed.get(pkg_key)
+                if not inst_ver:
+                    n_missing += 1
+                    missing_pkgs.append(r.name)
+                else:
+                    spec_str = str(r.specifier) if r.specifier else "(any)"
+                    if spec_str != "(any)":
+                        try:
+                            ss = SpecifierSet(spec_str)
+                            if Version(inst_ver) not in ss:
+                                n_conflicts += 1
+                                conflict_pkgs.append(f"{r.name} (has {inst_ver}, wants {spec_str})")
+                            else:
+                                n_ok += 1
+                        except Exception:
+                            n_ok += 1
+                    else:
+                        n_ok += 1
+            node_stats.append({
+                **n,
+                "n_deps": len(n["requirements"]),
+                "n_conflicts": n_conflicts,
+                "n_missing": n_missing,
+                "n_ok": n_ok,
+                "conflict_pkgs": conflict_pkgs,
+                "missing_pkgs": missing_pkgs,
+                "health_score": (n_ok / max(len(n["requirements"]), 1)) * 100,
             })
 
-        if rows:
-            df = pd.DataFrame(rows)
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Node": st.column_config.TextColumn(width="medium"),
-                    "Requirements": st.column_config.TextColumn(width="large"),
-                },
-            )
+        # ── Controls bar ─────────────────────────────────────────────────────
+        ctrl1, ctrl2, ctrl3 = st.columns([2, 1, 1])
+        with ctrl1:
+            filter_text = st.text_input("Filter nodes", "", key="node_filter",
+                                        placeholder="Type to search...")
+        with ctrl2:
+            sort_by = st.selectbox("Sort by", [
+                "Name (A-Z)", "Name (Z-A)",
+                "Most dependencies", "Fewest dependencies",
+                "Most conflicts", "Most missing",
+                "Lowest health", "Highest health",
+            ], key="node_sort")
+        with ctrl3:
+            view_mode = st.radio("View", ["List", "Grid", "Detail"],
+                                 horizontal=True, key="node_view")
+
+        # ── Filter ────────────────────────────────────────────────────────────
+        filtered = node_stats
+        if filter_text:
+            ft = filter_text.lower()
+            filtered = [n for n in filtered if ft in n["name"].lower()]
+
+        # ── Sort ──────────────────────────────────────────────────────────────
+        sort_map = {
+            "Name (A-Z)":           ("name", False),
+            "Name (Z-A)":           ("name", True),
+            "Most dependencies":    ("n_deps", True),
+            "Fewest dependencies":  ("n_deps", False),
+            "Most conflicts":       ("n_conflicts", True),
+            "Most missing":         ("n_missing", True),
+            "Lowest health":        ("health_score", False),
+            "Highest health":       ("health_score", True),
+        }
+        sort_key, sort_rev = sort_map.get(sort_by, ("name", False))
+        filtered.sort(key=lambda x: x[sort_key], reverse=sort_rev)
+
+        # ── Stats bar ─────────────────────────────────────────────────────────
+        st.caption(f"Showing {len(filtered)} of {len(node_stats)} nodes")
+
+        if not filtered:
+            st.info("No nodes match your filter.")
+        elif view_mode == "List":
+            _render_nodes_list(filtered)
+        elif view_mode == "Grid":
+            _render_nodes_grid(filtered)
         else:
-            st.info("No nodes found matching your filter.")
+            _render_nodes_detail(filtered)
 
     # ══════════════════════════════════════════════════════════════════════════
     # TAB 2: DEPENDENCIES
