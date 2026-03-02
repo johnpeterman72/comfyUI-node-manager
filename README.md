@@ -1,64 +1,130 @@
 # ComfyDep Manager
 
-A smart dependency resolver for ComfyUI custom nodes. Scans all installed nodes, detects package version conflicts, and lets you pick exact versions to install into ComfyUI's embedded Python environment.
+A smart dependency resolver for ComfyUI custom nodes. Scans all installed nodes, detects package version conflicts, and provides an interactive UI to resolve and install the right versions into ComfyUI's embedded Python environment.
 
 ## The Problem
 
-Every ComfyUI user knows the pain: different custom nodes demand conflicting versions of the same packages (`torch`, `numpy`, `torchvision`, `transformers`, `diffusers`, etc.). Installing one node breaks another. This tool gives you visibility and control.
-
-## Features
-
-- **Smart Node Scanning** — Scans your `custom_nodes` directory, parsing `requirements.txt`, `pyproject.toml`, `setup.py`, and `install.py` from each node
-- **GitHub Fallback** — When local dependency info is missing, fetches requirements from the node's GitHub repo automatically
-- **Conflict Detection** — Aggregates every package across all nodes, highlights version conflicts, and shows which nodes require what
-- **Visual Resolver** — Choose how to resolve each conflict: pick a compatible version, use a specific node's requirement, enter a manual version, or skip
-- **Direct Installation** — Installs packages directly into ComfyUI's embedded Python environment with dry-run support and automatic pip freeze backups
-- **Export/Import Profiles** — Save your resolution choices as a JSON profile and share or reuse them
+Every ComfyUI user knows the pain: different custom nodes demand conflicting versions of the same packages (`torch`, `numpy`, `torchvision`, `transformers`, `diffusers`, etc.). Installing one node breaks another. This tool gives you full visibility and control over every dependency across all your nodes.
 
 ## Quick Start
 
 ```bash
+# Install manager dependencies
 pip install -r requirements.txt
+
+# Launch the app
 streamlit run app.py
 ```
 
-Then in the sidebar:
-1. Verify or update the paths to your `custom_nodes` folder and embedded Python executable
-2. Click **Rescan All Nodes**
-3. Use the **Dependencies** tab to see conflicts
-4. Use the **Resolver** tab to choose versions
-5. Use the **Install** tab to apply changes
+Or on Windows, just double-click **`run.bat`**.
+
+The app opens at [http://localhost:8501](http://localhost:8501). Click **Rescan All Nodes** in the sidebar to begin.
 
 ## Default Paths
 
-These are configurable in the sidebar:
+Configurable in the sidebar:
 
 | Setting | Default |
 |---------|---------|
 | Custom Nodes Folder | `D:\SwarmUI\dlbackend\comfy\ComfyUI\custom_nodes` |
 | Embedded Python | `D:\SwarmUI\dlbackend\comfy\python_embeded\python.exe` |
 
-## Tabs
+## Features
 
-### Nodes
-Overview of every detected custom node with its raw requirements and dependency sources.
+### Node Score Cards (Nodes Tab)
 
-### Dependencies
-The heart of the app — every package grouped by name, showing current installed version, which nodes require it and their exact version specs, and conflict status (OK / CONFLICT / MISSING / WARN).
+Each custom node gets a score card showing dependency count, conflict count, missing packages, and a health percentage. Three view modes:
 
-### Resolver
-Interactive resolution for each package: best compatible version, exact version from a node, latest, manual input, or skip.
+- **List** — compact expandable rows with colored status dots
+- **Grid** — 3-column card layout with colored borders (red = conflicts, orange = missing, green = healthy)
+- **Detail** — full info view with metrics, health bars, and all requirements
 
-### Install
-Review your selections, run a dry run, and install with one click. Includes automatic pip freeze backup, extra pip arguments support, warnings for special packages, and resolution profile export/import.
+Sort by name, dependency count, conflicts, missing packages, or health score.
+
+### Dependency Analysis (Dependencies Tab)
+
+Every package aggregated across all nodes:
+
+- Current installed version
+- Which nodes require it and their exact version specs
+- Conflict status: OK / CONFLICT / MISSING / WARN
+- Filter by status or search by package name
+
+### Interactive Resolver (Resolver Tab)
+
+Choose how to resolve each package:
+
+- **Best compatible** — automatically computed version satisfying the most specifiers
+- **Exact version from a node** — use a specific node's pinned version
+- **Latest** — let pip pick the newest
+- **Manual** — enter any version or range
+- **Skip** — leave this package alone
+
+Bulk actions: Auto-resolve all, Skip all, Clear all choices.
+
+### Installation (Install Tab)
+
+#### Environment Health Panel
+
+Two automated checks run before every install:
+
+- **Corrupted Packages** — scans `site-packages` for broken `~tilde` folders left from failed installs. One-click button to delete them all.
+- **C/C++ Compiler (MSVC)** — detects if Visual C++ Build Tools are installed. If missing, offers one-click install via `winget`.
+
+#### Package Installation
+
+- Review all selected packages in a summary table
+- Dry run mode to preview the pip command
+- Automatic `pip freeze` backup before every install
+- Extra pip arguments support (e.g., `--index-url` for PyTorch wheels)
+- Warnings for special packages (torch, xformers, etc.)
+- Smart error diagnostics: detects MSVC errors, wheel build failures, permission issues, corrupted packages, and shows actionable fix instructions
+- Export/import resolution profiles as JSON
+
+### pip Update Checker (Sidebar)
+
+Checks the embedded Python's pip version against PyPI on startup. Shows a warning with one-click upgrade button when an update is available.
+
+### Terminal Log
+
+Collapsible terminal at the bottom of every page showing timestamped activity: scanning, pip operations, installs, errors. Includes a copy button for easy troubleshooting.
+
+### GitHub Fallback
+
+When a node has no local dependency files, the app detects its GitHub repo (from `.git/config` or README) and fetches `requirements.txt` from the remote.
+
+### Other Features
+
+- Scan result caching (JSON on disk)
+- Floating scroll-to-top button
+- Configurable paths in the sidebar
+
+## File Structure
+
+```
+comfydep/
+  app.py              # Main application (single file)
+  requirements.txt    # Manager's own dependencies
+  run.bat             # Windows launcher
+  backups/            # Auto-created pip freeze backups
+  .comfydep_cache.json  # Auto-created scan cache
+```
 
 ## Tech Stack
 
-- Python + Streamlit
-- `packaging` for standards-compliant requirement parsing
-- `pandas` for data display
-- `requests` for GitHub fallback
-- `subprocess` for pip integration
+- **Streamlit** — UI framework
+- **packaging** — PEP 440 requirement parsing and version comparison
+- **pandas** — data display
+- **requests** — GitHub fallback
+- **subprocess** — pip integration and system tool execution
+
+## Requirements
+
+- Python 3.10+
+- Streamlit >= 1.30.0
+- pandas >= 2.0.0
+- packaging >= 23.0
+- requests >= 2.28.0
 
 ## License
 
